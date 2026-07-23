@@ -92,6 +92,14 @@ def parse_args():
     )
 
     parser.add_argument(
+        "-discord",
+        dest="discord",
+        action="store_true",
+        help="Send a Discord webhook notification when a user goes live.\n"
+        "Requires configuring the discord.json file",
+    )
+
+    parser.add_argument(
         "-bitrate",
         dest="bitrate",
         help="Specify the bitrate for the output file (e.g. 1000k, 1M). Default: None (keep original)",

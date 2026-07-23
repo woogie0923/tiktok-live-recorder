@@ -27,6 +27,7 @@ class TikTokRecorder:
         self.bitrate = config.bitrate
         self.ffmpeg_path = config.ffmpeg_path
         self.use_telegram = config.use_telegram
+        self.use_discord = config.use_discord
         self._proxy = config.proxy
         self._cookies = config.cookies
 
@@ -92,6 +93,26 @@ class TikTokRecorder:
         elif self.mode == Mode.FOLLOWERS:
             self.followers_mode()
 
+    @staticmethod
+    def _poll_interval_label(minutes: int) -> str:
+        return f"{minutes}min"
+
+    def _ensure_monitoring_logged(self, monitoring_logged: bool) -> bool:
+        if not monitoring_logged:
+            logger.info(
+                f"Monitoring on-air livestreams (poll={self._poll_interval_label(self.automatic_interval)})."
+            )
+            return True
+        return monitoring_logged
+
+    def _notify_discord_live(self, user: str, room_id: str | None) -> None:
+        if not self.use_discord:
+            return
+
+        from notify.discord import DiscordNotifier
+
+        DiscordNotifier().notify_live(user, room_id)
+
     def manual_mode(self):
         if not self.tiktok.is_room_alive(self.room_id):
             raise UserLiveError(f"@{self.user}: {TikTokError.USER_NOT_CURRENTLY_LIVE}")
@@ -99,16 +120,21 @@ class TikTokRecorder:
         self.start_recording(self.user, self.room_id)
 
     def automatic_mode(self):
+        monitoring_logged = False
         while True:
             try:
                 self.room_id = self.tiktok.get_room_id_from_user(self.user)
-                self.manual_mode()
+                if not self.tiktok.is_room_alive(self.room_id):
+                    raise UserLiveError(
+                        f"@{self.user}: {TikTokError.USER_NOT_CURRENTLY_LIVE}"
+                    )
 
-            except (UserLiveError, LiveNotFound) as ex:
-                logger.info(ex)
-                logger.info(
-                    f"Waiting {self.automatic_interval} minutes before recheck\n"
-                )
+                logger.info(f"@{self.user} is live. Starting recording...")
+                monitoring_logged = False
+                self.start_recording(self.user, self.room_id)
+
+            except (UserLiveError, LiveNotFound):
+                monitoring_logged = self._ensure_monitoring_logged(monitoring_logged)
                 time.sleep(self.automatic_interval * TimeOut.ONE_MINUTE)
 
             except (ConnectionError, RequestException, HTTPException):
@@ -117,6 +143,7 @@ class TikTokRecorder:
 
     def followers_mode(self):
         active_recordings = {}  # follower -> Thread
+        monitoring_logged = False
 
         while True:
             try:
@@ -137,6 +164,7 @@ class TikTokRecorder:
                             continue
 
                         logger.info(f"@{follower} is live. Starting recording...")
+                        monitoring_logged = False
 
                         thread = Thread(
                             target=self.start_recording,
@@ -159,17 +187,11 @@ class TikTokRecorder:
                         )
                         continue
 
-                print()
-                logger.info(
-                    f"Waiting {self.automatic_interval} minutes for the next check..."
-                )
+                monitoring_logged = self._ensure_monitoring_logged(monitoring_logged)
                 time.sleep(self.automatic_interval * TimeOut.ONE_MINUTE)
 
-            except (UserLiveError, LiveNotFound) as ex:
-                logger.info(ex)
-                logger.info(
-                    f"Waiting {self.automatic_interval} minutes before recheck\n"
-                )
+            except (UserLiveError, LiveNotFound):
+                monitoring_logged = self._ensure_monitoring_logged(monitoring_logged)
                 time.sleep(self.automatic_interval * TimeOut.ONE_MINUTE)
 
             except (ConnectionError, RequestException, HTTPException):
@@ -188,6 +210,8 @@ class TikTokRecorder:
         """
         Start recording live
         """
+        self._notify_discord_live(user, room_id)
+
         live_urls = self.tiktok.get_live_url_candidates(room_id, user=user)
         if not live_urls:
             raise LiveNotFound(TikTokError.RETRIEVE_LIVE_URL)

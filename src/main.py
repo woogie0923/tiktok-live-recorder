@@ -29,6 +29,7 @@ def _build_config(args, mode, cookies, user=None):
         output=args.output,
         duration=args.duration,
         use_telegram=args.telegram,
+        use_discord=args.discord,
         bitrate=args.bitrate,
         ffmpeg_path=args.ffmpeg_path,
     )

@@ -31,6 +31,16 @@ def read_telegram_config():
         return json.load(f)
 
 
+def read_discord_config():
+    """
+    Loads the discord config file and returns it.
+    """
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(script_dir, "..", "discord.json")
+    with open(config_path, "r") as f:
+        return json.load(f)
+
+
 def is_termux() -> bool:
     """
     Checks if the script is running in Termux.

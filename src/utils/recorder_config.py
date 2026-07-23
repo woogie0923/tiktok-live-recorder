@@ -15,5 +15,6 @@ class RecorderConfig:
     output: str | None = None
     duration: int | None = None
     use_telegram: bool = False
+    use_discord: bool = False
     bitrate: str | None = None
     ffmpeg_path: str | None = None
