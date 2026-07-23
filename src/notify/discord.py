@@ -1,4 +1,5 @@
 import requests
+from pathlib import Path
 
 from utils.logger_manager import logger
 from utils.utils import read_discord_config
@@ -52,6 +53,23 @@ class DiscordNotifier:
 
         return " ".join(parts), allowed_mentions
 
+    def _post_payload(self, embed: dict, *, mention: bool = True) -> None:
+        payload = {"embeds": [embed]}
+
+        if mention:
+            content, allowed_mentions = self._build_mention_content()
+            if content:
+                payload["content"] = content
+            if allowed_mentions:
+                payload["allowed_mentions"] = allowed_mentions
+
+        try:
+            response = requests.post(self.webhook_url, json=payload, timeout=10)
+            response.raise_for_status()
+        except requests.RequestException as e:
+            logger.error(f"Failed to send Discord notification: {e}")
+            return
+
     def notify_live(
         self,
         username: str,
@@ -89,17 +107,44 @@ class DiscordNotifier:
                 {"name": "Room ID", "value": str(room_id), "inline": True},
             ]
 
-        payload = {"embeds": [embed]}
+        self._post_payload(embed, mention=True)
+        logger.info("Discord live notification sent.")
 
-        content, allowed_mentions = self._build_mention_content()
-        if content:
-            payload["content"] = content
-        if allowed_mentions:
-            payload["allowed_mentions"] = allowed_mentions
+    def notify_recording_finished(
+        self,
+        username: str,
+        *,
+        file_path: str,
+        file_size_mb: float,
+        title: str | None = None,
+        avatar_url: str | None = None,
+        nickname: str | None = None,
+    ) -> None:
+        if not self.webhook_url:
+            logger.error(
+                "Discord notifications enabled but webhook_url is missing in discord.json."
+            )
+            return
 
-        try:
-            response = requests.post(self.webhook_url, json=payload, timeout=10)
-            response.raise_for_status()
-            logger.info("Discord live notification sent.")
-        except requests.RequestException as e:
-            logger.error(f"Failed to send Discord notification: {e}")
+        file_name = Path(file_path).name
+        author_name = nickname or f"@{username}"
+        embed: dict = {
+            "title": title or "Recording finished",
+            "color": 5763719,
+            "description": (
+                f"**@{username}** recording saved.\n"
+                f"**File:** `{file_name}`\n"
+                f"**Size:** {file_size_mb} MB"
+            ),
+            "author": {
+                "name": author_name,
+                "url": f"https://www.tiktok.com/@{username}",
+            },
+        }
+
+        if avatar_url:
+            embed["author"]["icon_url"] = avatar_url
+            embed["thumbnail"] = {"url": avatar_url}
+
+        self._post_payload(embed, mention=False)
+        logger.info("Discord recording finished notification sent.")

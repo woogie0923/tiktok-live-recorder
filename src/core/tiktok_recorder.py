@@ -30,6 +30,7 @@ class TikTokRecorder:
         self.use_discord = config.use_discord
         self._proxy = config.proxy
         self._cookies = config.cookies
+        self._discord_live_details: dict = {}
 
     def _setup(self):
         """Resolve user/room data and validate prerequisites via network calls."""
@@ -118,9 +119,32 @@ class TikTokRecorder:
             except Exception as ex:
                 logger.warning(f"Could not fetch live details for Discord: {ex}")
 
+        self._discord_live_details = details
         DiscordNotifier().notify_live(
             details.get("username") or user,
             room_id=room_id,
+            title=details.get("title"),
+            avatar_url=details.get("avatar_url"),
+            nickname=details.get("nickname"),
+        )
+
+    def _notify_discord_recording_finished(self, user: str, recording_path: str) -> None:
+        if not self.use_discord:
+            return
+
+        from notify.discord import DiscordNotifier
+
+        mp4_path = recording_path.replace("_flv.mp4", ".mp4")
+        output_path = mp4_path if Path(mp4_path).exists() else recording_path
+        if not Path(output_path).exists():
+            return
+
+        details = self._discord_live_details or {}
+        size_mb = Path(output_path).stat().st_size / (1024 * 1024)
+        DiscordNotifier().notify_recording_finished(
+            details.get("username") or user,
+            file_path=str(Path(output_path).resolve()),
+            file_size_mb=round(size_mb, 1),
             title=details.get("title"),
             avatar_url=details.get("avatar_url"),
             nickname=details.get("nickname"),
@@ -314,6 +338,7 @@ class TikTokRecorder:
         VideoManagement.convert_flv_to_mp4(output, self.bitrate, self.ffmpeg_path)
         if self.use_telegram:
             self._upload_to_telegram(output)
+        self._notify_discord_recording_finished(user, output)
 
     def _upload_to_telegram(self, recording_path: str) -> None:
         from upload.telegram import Telegram
