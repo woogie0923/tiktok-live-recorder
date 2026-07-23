@@ -111,7 +111,20 @@ class TikTokRecorder:
 
         from notify.discord import DiscordNotifier
 
-        DiscordNotifier().notify_live(user, room_id)
+        details = {}
+        if room_id:
+            try:
+                details = self.tiktok.get_live_room_details(room_id, user=user)
+            except Exception as ex:
+                logger.warning(f"Could not fetch live details for Discord: {ex}")
+
+        DiscordNotifier().notify_live(
+            details.get("username") or user,
+            room_id=room_id,
+            title=details.get("title"),
+            avatar_url=details.get("avatar_url"),
+            nickname=details.get("nickname"),
+        )
 
     def manual_mode(self):
         if not self.tiktok.is_room_alive(self.room_id):

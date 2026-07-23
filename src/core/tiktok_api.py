@@ -348,6 +348,52 @@ class TikTokAPI:
         )
         return f"{self.WEBCAST_URL}/webcast/room/info/?{params}"
 
+    @staticmethod
+    def _first_image_url(image_obj: dict | None) -> str | None:
+        if not image_obj:
+            return None
+
+        urls = image_obj.get("url_list") or []
+        for url in urls:
+            lower_url = url.lower()
+            if ".jpeg" in lower_url or ".jpg" in lower_url or ".png" in lower_url:
+                return url
+        return urls[0] if urls else None
+
+    def get_live_room_details(self, room_id: str, user: str | None = None) -> dict:
+        """
+        Return live metadata for notifications (title, avatar, username).
+        Falls back to the provided username when the API omits fields.
+        """
+        details = {
+            "username": user,
+            "nickname": None,
+            "title": None,
+            "avatar_url": None,
+            "room_id": room_id,
+        }
+
+        try:
+            data = self.http_client.get(self._room_info_url(room_id)).json()
+        except Exception:
+            return details
+
+        if data.get("status_code") not in (0, 4003110):
+            return details
+
+        room_data = data.get("data") or {}
+        owner = room_data.get("owner") or {}
+
+        details["username"] = owner.get("display_id") or user
+        details["nickname"] = owner.get("nickname")
+        details["title"] = room_data.get("title") or None
+        details["avatar_url"] = (
+            self._first_image_url(owner.get("avatar_medium"))
+            or self._first_image_url(owner.get("avatar_thumb"))
+            or self._first_image_url(owner.get("avatar_large"))
+        )
+        return details
+
     # Enough to beat a 4-level gap (e.g. origin=10 vs uhd_60=6) without
     # letting 720p60 outrank 1080p30 when no uhd_60 is available.
     _FPS_60_WEIGHT_BONUS = 5_000_000_000

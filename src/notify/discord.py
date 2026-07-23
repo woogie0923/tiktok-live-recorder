@@ -52,7 +52,15 @@ class DiscordNotifier:
 
         return " ".join(parts), allowed_mentions
 
-    def notify_live(self, username: str, room_id: str | None = None) -> None:
+    def notify_live(
+        self,
+        username: str,
+        room_id: str | None = None,
+        *,
+        title: str | None = None,
+        avatar_url: str | None = None,
+        nickname: str | None = None,
+    ) -> None:
         if not self.webhook_url:
             logger.error(
                 "Discord notifications enabled but webhook_url is missing in discord.json."
@@ -60,29 +68,28 @@ class DiscordNotifier:
             return
 
         live_url = f"https://www.tiktok.com/@{username}/live"
-        payload = {
-            "embeds": [
-                {
-                    "title": f"@{username} is live on TikTok",
-                    "url": live_url,
-                    "color": 5793266,
-                    "description": "Recording is starting.",
-                    **(
-                        {
-                            "fields": [
-                                {
-                                    "name": "Room ID",
-                                    "value": str(room_id),
-                                    "inline": True,
-                                }
-                            ]
-                        }
-                        if room_id
-                        else {}
-                    ),
-                }
-            ]
+        author_name = nickname or f"@{username}"
+        embed: dict = {
+            "title": title or "Live now",
+            "url": live_url,
+            "color": 5793266,
+            "description": f"**@{username}** is live on TikTok.\nRecording is starting.",
+            "author": {
+                "name": author_name,
+                "url": f"https://www.tiktok.com/@{username}",
+            },
         }
+
+        if avatar_url:
+            embed["author"]["icon_url"] = avatar_url
+            embed["thumbnail"] = {"url": avatar_url}
+
+        if room_id:
+            embed["fields"] = [
+                {"name": "Room ID", "value": str(room_id), "inline": True},
+            ]
+
+        payload = {"embeds": [embed]}
 
         content, allowed_mentions = self._build_mention_content()
         if content:
