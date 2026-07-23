@@ -144,13 +144,15 @@ def test_get_live_url_candidates_returns_ordered_unique_streams():
                         "pull_data": {
                             "stream_data": (
                                 '{"data": {'
+                                '"origin": {"main": {"flv": "https://cdn/origin.flv"}},'
                                 '"hd": {"main": {"flv": "https://cdn/hd.flv"}},'
                                 '"ld": {"main": {"flv": "https://cdn/ld.flv"}},'
-                                '"ao": {"main": {"flv": "https://cdn/audio.flv"}}'
+                                '"ao": {"main": {"flv": "https://cdn/audio.flv?only_audio=1"}}'
                                 "}}"
                             ),
                             "options": {
                                 "qualities": [
+                                    {"sdk_key": "origin", "level": 10},
                                     {"sdk_key": "hd", "level": 3},
                                     {"sdk_key": "ld", "level": 1},
                                 ]
@@ -158,6 +160,7 @@ def test_get_live_url_candidates_returns_ordered_unique_streams():
                         }
                     },
                     "flv_pull_url": {
+                        "FULL_HD1": "https://cdn/fullhd.flv",
                         "HD1": "https://cdn/hd.flv",
                         "SD1": "https://cdn/sd.flv",
                     },
@@ -168,8 +171,50 @@ def test_get_live_url_candidates_returns_ordered_unique_streams():
     )
 
     assert api.get_live_url_candidates("123", user="creator") == [
+        "https://cdn/origin.flv",
         "https://cdn/hd.flv",
         "https://cdn/ld.flv",
-        "https://cdn/audio.flv",
+        "https://cdn/fullhd.flv",
         "https://cdn/sd.flv",
     ]
+
+
+def test_get_live_url_candidates_prefers_uhd_60_over_origin_and_hd():
+    api = build_api(
+        {
+            "data": {
+                "status": 2,
+                "stream_url": {
+                    "live_core_sdk_data": {
+                        "pull_data": {
+                            "stream_data": (
+                                '{"data": {'
+                                '"hd": {"main": {"flv": "https://cdn/hd.flv"}},'
+                                '"uhd_60": {"main": {"flv": "https://cdn/uhd60.flv", '
+                                '"sdk_params": "{\\"stream_suffix\\":\\"uhd560\\",'
+                                '\\"resolution\\":\\"1080x1920\\"}"}},'
+                                '"origin": {"main": {"flv": "https://cdn/origin.flv", '
+                                '"sdk_params": "{\\"resolution\\":\\"1080x1920\\"}"}}'
+                                "}}"
+                            ),
+                            "options": {
+                                "qualities": [
+                                    {"sdk_key": "origin", "level": 10},
+                                    {"sdk_key": "uhd_60", "level": 6},
+                                    {"sdk_key": "hd", "level": 3},
+                                ]
+                            },
+                        }
+                    },
+                    "flv_pull_url": {"HD1": "https://cdn/hd.flv"},
+                },
+            },
+            "status_code": 0,
+        },
+    )
+
+    candidates = api.get_live_url_candidates("123", user="creator")
+    assert candidates[0] == "https://cdn/uhd60.flv"
+    assert candidates.index("https://cdn/origin.flv") < candidates.index(
+        "https://cdn/hd.flv"
+    )

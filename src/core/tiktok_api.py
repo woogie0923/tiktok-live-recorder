@@ -60,9 +60,7 @@ class TikTokAPI:
         ):
             return False
 
-        room_info = self.http_client.get(
-            f"{self.WEBCAST_URL}/webcast/room/info/?aid=1988&room_id={room_id}"
-        ).json()
+        room_info = self.http_client.get(self._room_info_url(room_id)).json()
 
         status_code = room_info.get("status_code", 0)
         if status_code == 4003110:
@@ -107,9 +105,7 @@ class TikTokAPI:
         """
         Given a room_id, I get the username
         """
-        data = self.http_client.get(
-            f"{self.WEBCAST_URL}/webcast/room/info/?aid=1988&room_id={room_id}"
-        ).json()
+        data = self.http_client.get(self._room_info_url(room_id)).json()
 
         if "Follow the creator to watch their LIVE" in json.dumps(data):
             raise UserLiveError(TikTokError.ACCOUNT_PRIVATE_FOLLOW)
@@ -299,13 +295,28 @@ class TikTokAPI:
 
             flv_matches = re.findall(r'https?://[^\s"\'<>]+\.flv[^\s"\'<>]*', content)
             if flv_matches:
-                # Prefer original (_or4) or SD quality
-                for url in flv_matches:
-                    url = html.unescape(url.rstrip("\\"))
-                    if "_or4" in url or "_sd" in url:
-                        logger.info(f"Found stream URL from page: {url[:80]}...")
+                quality_markers = (
+                    "_uhd560",
+                    "_uhd5",
+                    "_qhd560",
+                    "_qhd5",
+                    "_hd560",
+                    "_or4",
+                    "_hd5",
+                    "_sd5",
+                    "_ld5",
+                )
+                normalized = [
+                    html.unescape(url.rstrip("\\")) for url in flv_matches
+                ]
+                for marker in quality_markers:
+                    for url in normalized:
+                        if marker in url and "only_audio=1" not in url:
+                            logger.info(f"Found stream URL from page: {url[:80]}...")
+                            return url
+                for url in normalized:
+                    if "only_audio=1" not in url:
                         return url
-                return html.unescape(flv_matches[0].rstrip("\\"))
 
             hls_matches = re.findall(r'https?://[^\s"\'<>]+\.m3u8[^\s"\'<>]*', content)
             if hls_matches:
@@ -317,8 +328,85 @@ class TikTokAPI:
             return None
 
     def _add_live_url_candidate(self, candidates: list[str], url: str | None) -> None:
-        if url and url not in candidates:
+        if url and "only_audio=1" not in url and url not in candidates:
             candidates.append(url)
+
+    def _room_info_url(self, room_id: str) -> str:
+        """
+        Build the webcast room/info URL with params that request the full
+        HEVC quality ladder (origin, uhd_60, etc.), matching what the
+        TikTok web player sends via webcast/feed (device_type=web_h265).
+        """
+        params = (
+            "aid=1988"
+            "&device_platform=web_pc"
+            "&device_type=web_h265"
+            "&screen_height=1080"
+            "&screen_width=1920"
+            f"&room_id={room_id}"
+            "&user_is_login=true"
+        )
+        return f"{self.WEBCAST_URL}/webcast/room/info/?{params}"
+
+    # Enough to beat a 4-level gap (e.g. origin=10 vs uhd_60=6) without
+    # letting 720p60 outrank 1080p30 when no uhd_60 is available.
+    _FPS_60_WEIGHT_BONUS = 5_000_000_000
+
+    @staticmethod
+    def _is_60fps_stream(sdk_key: str, entry: dict) -> bool:
+        if sdk_key != "ao" and "_60" in sdk_key:
+            return True
+
+        stream_main = entry.get("main", {})
+        try:
+            sdk_params = json.loads(stream_main.get("sdk_params") or "{}")
+        except (ValueError, TypeError):
+            sdk_params = {}
+
+        stream_suffix = sdk_params.get("stream_suffix") or ""
+        if "560" in stream_suffix:
+            return True
+
+        flv = stream_main.get("flv") or ""
+        return bool(re.search(r"_(?:uhd|hd|qhd)560", flv))
+
+    @staticmethod
+    def _stream_entry_weight(entry: dict) -> int:
+        """
+        Best-effort quality weight from sdk_params (vbitrate + resolution).
+        Used for stream entries not listed in options.qualities.
+        """
+        try:
+            sdk_params = json.loads(entry.get("main", {}).get("sdk_params") or "{}")
+        except (ValueError, TypeError):
+            return 0
+
+        vbitrate = sdk_params.get("vbitrate") or 0
+
+        pixels = 0
+        resolution = sdk_params.get("resolution") or ""
+        if "x" in resolution:
+            try:
+                width_str, height_str = resolution.lower().split("x")
+                pixels = int(width_str) * int(height_str)
+            except ValueError:
+                pixels = 0
+
+        return vbitrate * 10_000 + pixels
+
+    def _get_hevc_stream_data(self, stream_url: dict) -> dict:
+        """
+        Parsed data dict from hevc_stream_data / hevcStreamData when present.
+        """
+        for key in ("hevc_stream_data", "hevcStreamData"):
+            raw = stream_url.get(key)
+            if not raw:
+                continue
+            try:
+                return json.loads(raw).get("data", {}) or {}
+            except (ValueError, TypeError):
+                logger.warning(f"Failed to parse {key}; ignoring it.")
+        return {}
 
     def get_live_urls(self, room_id: str, user: str = None) -> list[str]:
         """
@@ -326,9 +414,7 @@ class TikTokAPI:
         If the API returns status code 4003110 and a username is provided,
         falls back to scraping the live page directly.
         """
-        data = self.http_client.get(
-            f"{self.WEBCAST_URL}/webcast/room/info/?aid=1988&room_id={room_id}"
-        ).json()
+        data = self.http_client.get(self._room_info_url(room_id)).json()
 
         if "This account is private" in data:
             raise UserLiveError(TikTokError.ACCOUNT_PRIVATE)
@@ -378,16 +464,34 @@ class TikTokAPI:
             .get("options", {})
             .get("qualities", [])
         )
-        if not qualities:
+        hevc_data = self._get_hevc_stream_data(stream_url)
+
+        if not qualities and not hevc_data:
             logger.warning("No qualities found in the stream data. Returning None.")
             return candidates
+
         level_map = {q["sdk_key"]: q["level"] for q in qualities}
 
-        ordered_sdk_keys = sorted(
-            sdk_data.keys(), key=lambda key: level_map.get(key, -1), reverse=True
+        def weight(sdk_key: str, entry: dict) -> int:
+            if sdk_key == "ao":
+                return -1
+            if sdk_key in level_map:
+                base = level_map[sdk_key] * 1_000_000_000
+            else:
+                base = self._stream_entry_weight(entry)
+            if self._is_60fps_stream(sdk_key, entry):
+                base += self._FPS_60_WEIGHT_BONUS
+            return base
+
+        combined_entries = [
+            (sdk_key, entry)
+            for sdk_key, entry in list(sdk_data.items()) + list(hevc_data.items())
+            if sdk_key != "ao"
+        ]
+        ordered_entries = sorted(
+            combined_entries, key=lambda item: weight(*item), reverse=True
         )
-        for sdk_key in ordered_sdk_keys:
-            entry = sdk_data[sdk_key]
+        for _sdk_key, entry in ordered_entries:
             stream_main = entry.get("main", {})
             self._add_live_url_candidate(candidates, stream_main.get("flv"))
             self._add_live_url_candidate(

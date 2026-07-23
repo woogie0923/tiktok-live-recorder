@@ -275,6 +275,27 @@ class TikTokRecorder:
 
         logger.info(f"Recording finished: {Path(output).resolve()}\n")
         VideoManagement.convert_flv_to_mp4(output, self.bitrate, self.ffmpeg_path)
+        if self.use_telegram:
+            self._upload_to_telegram(output)
+
+    def _upload_to_telegram(self, recording_path: str) -> None:
+        from upload.telegram import Telegram
+        from utils.utils import read_telegram_config
+
+        mp4_path = recording_path.replace("_flv.mp4", ".mp4")
+        upload_path = mp4_path if Path(mp4_path).exists() else recording_path
+        if not Path(upload_path).exists():
+            logger.error("No file available for Telegram upload.")
+            return
+
+        config = read_telegram_config()
+        if not config.get("api_id") or not config.get("api_hash"):
+            logger.error(
+                "Telegram upload enabled but api_id/api_hash are missing in telegram.json."
+            )
+            return
+
+        Telegram().upload(upload_path)
 
     def check_country_blacklisted(self):
         is_blacklisted = self.tiktok.is_country_blacklisted()
