@@ -27,6 +27,7 @@ class TikTokRecorder:
         self.bitrate = config.bitrate
         self.ffmpeg_path = config.ffmpeg_path
         self.fix_sync = config.fix_sync
+        self.keep_source = config.keep_source
         self.use_telegram = config.use_telegram
         self.use_discord = config.use_discord
         self._proxy = config.proxy
@@ -254,7 +255,7 @@ class TikTokRecorder:
         return str(path.with_name(f"{stem}_part{segment_index + 1}_flv.mp4"))
 
     def _refresh_live_url(self, room_id: str, user: str, url_index: int) -> str | None:
-        live_urls = self.tiktok.get_live_url_candidates(room_id, user=user)
+        live_urls = self.tiktok.get_recording_flv_url_candidates(room_id, user=user)
         if not live_urls:
             return None
         if url_index < len(live_urls):
@@ -374,28 +375,38 @@ class TikTokRecorder:
         """
         self._notify_discord_live(user, room_id)
 
-        live_urls = self.tiktok.get_live_url_candidates(room_id, user=user)
-        if not live_urls:
+        flv_tiers = self.tiktok.get_recording_flv_tiers(room_id, user=user)
+        if not flv_tiers:
             raise LiveNotFound(TikTokError.RETRIEVE_LIVE_URL)
 
         base_output = self._build_output_path(user)
         segments: list[str] = []
 
-        for index, live_url in enumerate(live_urls, start=1):
+        for index, (sdk_key, quality_name, live_url, tier_entry) in enumerate(
+            flv_tiers, start=1
+        ):
+            logger.info(
+                self.tiktok.describe_recording_tier(sdk_key, tier_entry, live_url)
+            )
+            logger.info(
+                f"Started recording ({quality_name} / {sdk_key}, "
+                f"option {index}/{len(flv_tiers)})..."
+            )
             segments = self._record_stream_segments(
                 user,
                 room_id,
                 live_url,
                 base_output,
                 index,
-                len(live_urls),
+                len(flv_tiers),
             )
             if segments:
+                logger.info(f"Recording used {quality_name} ({sdk_key}).")
                 break
 
             logger.warning(
-                f"Stream {index}/{len(live_urls)} returned no usable data. "
-                "Trying another CDN/quality..."
+                f"{quality_name} ({sdk_key}) returned no usable data. "
+                "Trying another quality..."
             )
         else:
             raise LiveNotFound(TikTokError.RETRIEVE_LIVE_URL)
@@ -407,7 +418,11 @@ class TikTokRecorder:
             self.bitrate,
             self.ffmpeg_path,
             fix_sync=self.fix_sync,
+            keep_source=self.keep_source,
         )
+        mp4_path = base_output.replace("_flv.mp4", ".mp4")
+        if Path(mp4_path).exists():
+            VideoManagement.log_video_stream_info(mp4_path, self.ffmpeg_path)
         if self.use_telegram:
             self._upload_to_telegram(base_output)
         self._notify_discord_recording_finished(user, base_output)

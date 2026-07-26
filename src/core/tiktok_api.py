@@ -399,6 +399,40 @@ class TikTokAPI:
     _FPS_60_WEIGHT_BONUS = 5_000_000_000
 
     @staticmethod
+    def _parse_sdk_params(entry: dict) -> dict:
+        try:
+            return json.loads((entry.get("main") or {}).get("sdk_params") or "{}")
+        except (ValueError, TypeError):
+            return {}
+
+    @staticmethod
+    def _flv_url_matches_tier(sdk_key: str, entry: dict, flv_url: str) -> bool:
+        sdk_params = TikTokAPI._parse_sdk_params(entry)
+        suffix = sdk_params.get("stream_suffix") or ""
+        if suffix:
+            return suffix in flv_url
+
+        if sdk_key == "origin":
+            return not re.search(r"_(?:ld|sd|hd|uhd|qhd)\d", flv_url)
+
+        if "_60" in sdk_key or "560" in (sdk_params.get("stream_suffix") or ""):
+            return bool(re.search(r"(?:uhd|hd|qhd)560|_60", flv_url))
+
+        return True
+
+    @staticmethod
+    def _tier_debug_label(sdk_key: str, entry: dict, flv_url: str) -> str:
+        sdk_params = TikTokAPI._parse_sdk_params(entry)
+        suffix = sdk_params.get("stream_suffix") or "none"
+        resolution = sdk_params.get("resolution") or "unknown"
+        vbitrate = sdk_params.get("vbitrate") or "unknown"
+        url_tail = flv_url.rsplit("/", 1)[-1][:48]
+        return (
+            f"sdk={sdk_key}, res={resolution}, suffix={suffix}, "
+            f"vbitrate={vbitrate}, file={url_tail}"
+        )
+
+    @staticmethod
     def _is_60fps_stream(sdk_key: str, entry: dict) -> bool:
         if sdk_key != "ao" and "_60" in sdk_key:
             return True
@@ -454,6 +488,185 @@ class TikTokAPI:
                 logger.warning(f"Failed to parse {key}; ignoring it.")
         return {}
 
+    @staticmethod
+    def _quality_name_map(stream_url: dict) -> dict[str, str]:
+        qualities = (
+            stream_url.get("live_core_sdk_data", {})
+            .get("pull_data", {})
+            .get("options", {})
+            .get("qualities", [])
+        )
+        return {
+            quality["sdk_key"]: quality.get("name") or quality["sdk_key"]
+            for quality in qualities
+        }
+
+    def _ordered_stream_entries(
+        self, stream_url: dict
+    ) -> list[tuple[str, dict]]:
+        sdk_data_str = (
+            stream_url.get("live_core_sdk_data", {})
+            .get("pull_data", {})
+            .get("stream_data")
+        )
+        if not sdk_data_str:
+            return []
+
+        sdk_data = json.loads(sdk_data_str).get("data", {})
+        qualities = (
+            stream_url.get("live_core_sdk_data", {})
+            .get("pull_data", {})
+            .get("options", {})
+            .get("qualities", [])
+        )
+        hevc_data = self._get_hevc_stream_data(stream_url)
+        if not qualities and not hevc_data:
+            return []
+
+        level_map = {quality["sdk_key"]: quality["level"] for quality in qualities}
+        merged: dict[str, dict] = {}
+        for sdk_key, entry in list(sdk_data.items()) + list(hevc_data.items()):
+            if sdk_key == "ao":
+                continue
+            flv_url = self._flv_url_from_entry(entry)
+            if not flv_url:
+                continue
+            if sdk_key not in merged:
+                merged[sdk_key] = entry
+                continue
+
+            current_url = self._flv_url_from_entry(merged[sdk_key]) or ""
+            current_valid = self._flv_url_matches_tier(sdk_key, merged[sdk_key], current_url)
+            new_valid = self._flv_url_matches_tier(sdk_key, entry, flv_url)
+            if new_valid and not current_valid:
+                merged[sdk_key] = entry
+                continue
+            if current_valid and not new_valid:
+                continue
+            if self._stream_weight(sdk_key, entry, level_map) >= self._stream_weight(
+                sdk_key, merged[sdk_key], level_map
+            ):
+                merged[sdk_key] = entry
+
+        return sorted(
+            merged.items(),
+            key=lambda item: self._stream_weight(item[0], item[1], level_map),
+            reverse=True,
+        )
+
+    def _stream_weight(self, sdk_key: str, entry: dict, level_map: dict) -> int:
+        if sdk_key == "ao":
+            return -1
+        if sdk_key in level_map:
+            base = level_map[sdk_key] * 1_000_000_000
+        else:
+            base = self._stream_entry_weight(entry)
+        if self._is_60fps_stream(sdk_key, entry):
+            base += self._FPS_60_WEIGHT_BONUS
+        return base
+
+    @staticmethod
+    def _flv_url_from_entry(entry: dict) -> str | None:
+        flv_url = (entry.get("main") or {}).get("flv")
+        if flv_url and "only_audio=1" not in flv_url:
+            return flv_url
+        return None
+
+    def get_recording_flv_tiers(
+        self, room_id: str, user: str | None = None
+    ) -> list[tuple[str, str, str, dict]]:
+        """
+        Return (sdk_key, quality_name, flv_url, entry) for recording, best-first.
+        Fallback order is highest tier, then origin, without stepping down to 720p/540p.
+        """
+        data = self.http_client.get(self._room_info_url(room_id)).json()
+
+        if "This account is private" in data:
+            raise UserLiveError(TikTokError.ACCOUNT_PRIVATE)
+
+        status_code = data.get("status_code", 0)
+        if status_code == 4003110:
+            if user:
+                fallback_url = self._get_stream_url_from_page(user)
+                if fallback_url and fallback_url.endswith(".flv"):
+                    return [("legacy", "legacy", fallback_url, {})]
+            raise UserLiveError(TikTokError.LIVE_RESTRICTION)
+
+        room_data = data.get("data") or {}
+        room_status = room_data.get("status")
+        if room_status is not None and str(room_status) != "2":
+            raise UserLiveError(TikTokError.USER_NOT_CURRENTLY_LIVE)
+
+        stream_url = room_data.get("stream_url", {})
+        quality_names = self._quality_name_map(stream_url)
+        tiers: list[tuple[str, str, str, dict]] = []
+
+        for sdk_key, entry in self._ordered_stream_entries(stream_url):
+            flv_url = self._flv_url_from_entry(entry)
+            if not flv_url:
+                continue
+            if not self._flv_url_matches_tier(sdk_key, entry, flv_url):
+                logger.warning(
+                    "Skipping tier "
+                    f"{sdk_key}: URL does not match sdk_params "
+                    f"({self._tier_debug_label(sdk_key, entry, flv_url)})"
+                )
+                continue
+            if self._is_60fps_stream(sdk_key, entry) and not re.search(
+                r"(?:uhd|hd|qhd)560|_60", flv_url
+            ):
+                logger.warning(
+                    "Skipping tier "
+                    f"{sdk_key}: labeled 60fps but URL has no 560 marker "
+                    f"({self._tier_debug_label(sdk_key, entry, flv_url)})"
+                )
+                continue
+            tiers.append(
+                (sdk_key, quality_names.get(sdk_key, sdk_key), flv_url, entry)
+            )
+
+        if not tiers:
+            flv_pull_url = stream_url.get("flv_pull_url", {})
+            for key in ("FULL_HD1", "HD1", "SD2", "SD1"):
+                legacy_url = flv_pull_url.get(key)
+                if legacy_url:
+                    return [(key.lower(), key, legacy_url, {})]
+            return []
+
+        selected: list[tuple[str, str, str, dict]] = []
+        seen_urls: set[str] = set()
+
+        def add_tier(
+            sdk_key: str, quality_name: str, flv_url: str, entry: dict
+        ) -> None:
+            if flv_url in seen_urls:
+                return
+            seen_urls.add(flv_url)
+            selected.append((sdk_key, quality_name, flv_url, entry))
+
+        highest = tiers[0]
+        add_tier(highest[0], highest[1], highest[2], highest[3])
+
+        origin = next((tier for tier in tiers if tier[0] == "origin"), None)
+        if origin:
+            add_tier(origin[0], origin[1], origin[2], origin[3])
+
+        for sdk_key, quality_name, flv_url, entry in tiers[1:]:
+            if sdk_key == "origin":
+                continue
+            if self._is_60fps_stream(sdk_key, entry):
+                add_tier(sdk_key, quality_name, flv_url, entry)
+
+        if len(selected) == 1 and highest[0] != "origin":
+            for sdk_key, quality_name, flv_url, entry in tiers[1:]:
+                add_tier(sdk_key, quality_name, flv_url, entry)
+
+        return selected
+
+    @staticmethod
+    def describe_recording_tier(sdk_key: str, entry: dict, flv_url: str) -> str:
+        return f"Recording source: {TikTokAPI._tier_debug_label(sdk_key, entry, flv_url)}"
+
     def get_live_urls(self, room_id: str, user: str = None) -> list[str]:
         """
         Return candidate CDN URLs (flv or m3u8) for the streaming.
@@ -503,7 +716,6 @@ class TikTokAPI:
             return candidates
 
         # Extract stream options
-        sdk_data = json.loads(sdk_data_str).get("data", {})
         qualities = (
             stream_url.get("live_core_sdk_data", {})
             .get("pull_data", {})
@@ -516,28 +728,7 @@ class TikTokAPI:
             logger.warning("No qualities found in the stream data. Returning None.")
             return candidates
 
-        level_map = {q["sdk_key"]: q["level"] for q in qualities}
-
-        def weight(sdk_key: str, entry: dict) -> int:
-            if sdk_key == "ao":
-                return -1
-            if sdk_key in level_map:
-                base = level_map[sdk_key] * 1_000_000_000
-            else:
-                base = self._stream_entry_weight(entry)
-            if self._is_60fps_stream(sdk_key, entry):
-                base += self._FPS_60_WEIGHT_BONUS
-            return base
-
-        combined_entries = [
-            (sdk_key, entry)
-            for sdk_key, entry in list(sdk_data.items()) + list(hevc_data.items())
-            if sdk_key != "ao"
-        ]
-        ordered_entries = sorted(
-            combined_entries, key=lambda item: weight(*item), reverse=True
-        )
-        for _sdk_key, entry in ordered_entries:
+        for sdk_key, entry in self._ordered_stream_entries(stream_url):
             stream_main = entry.get("main", {})
             self._add_live_url_candidate(candidates, stream_main.get("flv"))
             self._add_live_url_candidate(
@@ -562,6 +753,12 @@ class TikTokAPI:
     def get_live_url_candidates(self, room_id: str, user: str = None) -> list[str]:
         """Return candidate CDN URLs for the streaming."""
         return self.get_live_urls(room_id, user=user)
+
+    def get_recording_flv_url_candidates(
+        self, room_id: str, user: str | None = None
+    ) -> list[str]:
+        """Return FLV URLs for recording: highest tier, then origin, then other 60fps."""
+        return [url for _, _, url, _ in self.get_recording_flv_tiers(room_id, user=user)]
 
     def download_live_stream(self, live_url: str):
         """Generator that returns the live stream for a given room_id."""

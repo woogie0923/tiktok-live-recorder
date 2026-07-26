@@ -33,6 +33,7 @@ def _build_config(args, mode, cookies, user=None):
         bitrate=args.bitrate,
         ffmpeg_path=args.ffmpeg_path,
         fix_sync=args.fix_sync,
+        keep_source=args.keep_source,
     )
 
 

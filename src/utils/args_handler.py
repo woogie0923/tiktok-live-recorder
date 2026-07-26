@@ -125,6 +125,16 @@ def parse_args():
     )
 
     parser.add_argument(
+        "-keep-source",
+        dest="keep_source",
+        action="store_true",
+        help=(
+            "Keep the merged *_flv.mp4 capture and also write a .ts remux copy.\n"
+            "The normal .mp4 output is still created. TS can be easier to play for laggy streams."
+        ),
+    )
+
+    parser.add_argument(
         "-no-update-check",
         dest="update_check",
         action="store_false",

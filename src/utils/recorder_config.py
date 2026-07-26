@@ -19,3 +19,4 @@ class RecorderConfig:
     bitrate: str | None = None
     ffmpeg_path: str | None = None
     fix_sync: bool = False
+    keep_source: bool = False
