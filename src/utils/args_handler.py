@@ -115,6 +115,16 @@ def parse_args():
     )
 
     parser.add_argument(
+        "-fix-sync",
+        dest="fix_sync",
+        action="store_true",
+        help=(
+            "Re-encode the recording after capture to repair audio/video desync.\n"
+            "Use this when streams lag or drop (slower, but fixes drift like your 23-min issue)."
+        ),
+    )
+
+    parser.add_argument(
         "-no-update-check",
         dest="update_check",
         action="store_false",

@@ -32,6 +32,7 @@ def _build_config(args, mode, cookies, user=None):
         use_discord=args.discord,
         bitrate=args.bitrate,
         ffmpeg_path=args.ffmpeg_path,
+        fix_sync=args.fix_sync,
     )
 
 

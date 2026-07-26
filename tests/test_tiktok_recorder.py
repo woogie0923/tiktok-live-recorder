@@ -97,3 +97,20 @@ def test_setup_keeps_manual_room_id_allowed_when_country_check_is_blocked():
         "is_country_blacklisted",
         "is_room_alive:1234567890",
     ]
+
+
+def test_build_segment_path_uses_base_output_for_first_segment():
+    base = "recordings/TK_user_2026.07.26_21-00-00_flv.mp4"
+    assert TikTokRecorder._build_segment_path(base, 0) == base
+
+
+def test_build_segment_path_adds_part_suffix_for_reconnects():
+    base = "recordings/TK_user_2026.07.26_21-00-00_flv.mp4"
+    assert (
+        TikTokRecorder._build_segment_path(base, 1)
+        == "recordings/TK_user_2026.07.26_21-00-00_part2_flv.mp4"
+    )
+    assert (
+        TikTokRecorder._build_segment_path(base, 2)
+        == "recordings/TK_user_2026.07.26_21-00-00_part3_flv.mp4"
+    )

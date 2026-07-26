@@ -18,3 +18,4 @@ class RecorderConfig:
     use_discord: bool = False
     bitrate: str | None = None
     ffmpeg_path: str | None = None
+    fix_sync: bool = False
